@@ -24,7 +24,7 @@ class FolderNode {
   final String name;
 
   /// Folder nadrzędny (null tylko dla root)
-  final FolderNode? parent;
+  FolderNode? parent;
 
   /// Foldery zagnieżdżone
   final List<FolderNode> folders;
@@ -53,6 +53,19 @@ class FolderNode {
     return d;
   }
 }
+
+abstract class DragItem {}
+
+class DragSet extends DragItem {
+  final SetItem set;
+  DragSet(this.set);
+}
+
+class DragFolder extends DragItem {
+  final FolderNode folder;
+  DragFolder(this.folder);
+}
+
 
 /// =======================
 /// GŁÓWNA STRONA SETS
@@ -197,6 +210,29 @@ class _SetsPageState extends State<SetsPage> {
     );
   }
 
+  // ignore: unused_element
+  void _moveFolder(FolderNode folder, FolderNode target) {
+  if (folder == target) return;
+  if (_isDescendant(folder, target)) return;
+  if (target.depth >= 3) return;
+
+  setState(() {
+    folder.parent?.folders.remove(folder);
+    folder.parent = target;
+    target.folders.add(folder);
+  });
+}
+
+/// Sprawdza czy target jest potomkiem folderu
+bool _isDescendant(FolderNode folder, FolderNode target) {
+  FolderNode? p = target.parent;
+  while (p != null) {
+    if (p == folder) return true;
+    p = p.parent;
+  }
+  return false;
+}
+
   /// =======================
   /// UI
   /// =======================
@@ -209,7 +245,12 @@ class _SetsPageState extends State<SetsPage> {
       body: SafeArea(
         child: Column(
           children: [
-            _Header(path: _buildPath(current)),
+            _Header(
+              breadcrumb: _buildBreadcrumb(current),
+              onNavigate: (folder) {
+                setState(() => current = folder);
+              },
+            ),
 
             /// Pasek akcji
             _ActionsBar(
@@ -223,16 +264,31 @@ class _SetsPageState extends State<SetsPage> {
                 children: [
                   /// Przycisk cofania
                   if (current.parent != null)
-                    _BackTile(onTap: _goUp),
+                    _BackTile(
+                      onTap: _goUp,
+                      onAccept: (item) {
+                        if (item is DragSet) {
+                          _moveSet(item.set, current.parent!);
+                        }
+                        if (item is DragFolder) {
+                          _moveFolder(item.folder, current.parent!);
+                        }
+                      },
+                    ),
 
                   /// Foldery (DragTarget)
                   ...current.folders.map(
                     (folder) => _FolderTile(
                       folder: folder,
                       onTap: () => _openFolder(folder),
-                      onAcceptSet: (set) {
-                        if (folder.depth < 3) {
-                          _moveSet(set, folder);
+                      onAccept: (item) {
+                        if (item is DragSet) {
+                          _moveSet(item.set, folder);
+                        }
+
+                        if (item is DragFolder) {
+                          _moveFolder(item.folder, folder);
+                          
                         }
                       },
                     ),
@@ -253,17 +309,22 @@ class _SetsPageState extends State<SetsPage> {
     );
   }
 
-  /// Buduje ścieżkę typu /English/Grammar
-  String _buildPath(FolderNode node) {
-    final names = <String>[];
-    FolderNode? n = node;
-    while (n != null && n.name != '/') {
-      names.add(n.name);
-      n = n.parent;
-    }
-    return '/${names.reversed.join('/')}';
+
+
+  List<FolderNode> _buildBreadcrumb(FolderNode node) {
+  final path = <FolderNode>[];
+  FolderNode? n = node;
+
+  while (n != null) {
+    path.add(n);
+    n = n.parent;
   }
+
+  return path.reversed.toList(); // od root → current
 }
+}
+
+
 
 /// =======================
 /// KOMPONENTY UI
@@ -277,12 +338,14 @@ class _DraggableSetTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Draggable<SetItem>(
-      data: set,
+    return Draggable<DragSet>(
+      data: DragSet(set),
       feedback: Material(
         elevation: 6,
-        borderRadius: BorderRadius.circular(8),
-        child: SizedBox(width: 260, child: _SetTile(set: set)),
+        child: SizedBox(
+          width: 260,
+          child: _SetTile(set: set),
+        ),
       ),
       childWhenDragging: Opacity(
         opacity: 0.3,
@@ -293,34 +356,116 @@ class _DraggableSetTile extends StatelessWidget {
   }
 }
 
+
 /// Folder jako DragTarget
 class _FolderTile extends StatelessWidget {
   final FolderNode folder;
   final VoidCallback onTap;
-  final Function(SetItem) onAcceptSet;
+  final Function(DragItem) onAccept;
 
   const _FolderTile({
     required this.folder,
     required this.onTap,
-    required this.onAcceptSet,
+    required this.onAccept,
   });
 
   @override
   Widget build(BuildContext context) {
-    return DragTarget<SetItem>(
-      onWillAcceptWithDetails: (_) => folder.depth < 3,
-      onAcceptWithDetails: (details) => onAcceptSet(details.data),
-      builder: (context, candidates, rejected) {
+    return DragTarget<DragItem>(
+      onWillAcceptWithDetails: (details) {
+        final item = details.data;
+        if (item is DragSet) return folder.depth < 3;
+        if (item is DragFolder) {
+          if (item.folder == folder) return false;
+          if (folder.depth >= 3) return false;
+          return true;
+        }
+        return false;
+      },
+      onAcceptWithDetails: (details) => onAccept(details.data),
+      builder: (context, candidates, _) {
+        return Draggable<DragFolder>(
+          data: DragFolder(folder),
+          feedback: Material(
+            elevation: 6,
+            child: SizedBox(
+              width: 260,
+              child: _FolderTileView(folder: folder),
+            ),
+          ),
+          childWhenDragging: Opacity(
+            opacity: 0.4,
+            child: _FolderTileView(folder: folder),
+          ),
+          child: _FolderTileView(
+            folder: folder,
+            highlight: candidates.isNotEmpty,
+            onTap: onTap,
+          ),
+        );
+      },
+    );
+  }
+}
+
+
+      //onWillAcceptWithDetails: (_) => folder.depth < 3,
+      //onAcceptWithDetails: (details) => onAcceptSet(details.data),
+
+class _FolderTileView extends StatelessWidget {
+  final FolderNode folder;
+  final bool highlight;
+  final VoidCallback? onTap;
+
+  const _FolderTileView({
+    required this.folder,
+    this.highlight = false,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(
+        Icons.folder,
+        color: highlight
+            ? Theme.of(context).colorScheme.primary
+            : null,
+      ),
+      title: Text(folder.name),
+      subtitle: Text(
+        '${folder.folders.length} folders · ${folder.sets.length} sets',
+      ),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: onTap,
+    );
+  }
+}
+
+
+/// Cofanie do folderu nadrzędnego
+class _BackTile extends StatelessWidget {
+  final VoidCallback onTap;
+  final Function(DragItem) onAccept;
+
+  const _BackTile({
+    required this.onTap,
+    required this.onAccept,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return DragTarget<DragItem>(
+      onAcceptWithDetails: (details) => onAccept(details.data),
+      builder: (context, candidates, _) {
         return ListTile(
           leading: Icon(
-            Icons.folder,
+            Icons.arrow_upward,
             color: candidates.isNotEmpty
                 ? Theme.of(context).colorScheme.primary
                 : null,
           ),
-          title: Text(folder.name),
-          subtitle: Text('${folder.sets.length} sets'),
-          trailing: const Icon(Icons.chevron_right),
+          title: const Text('Up'),
           onTap: onTap,
         );
       },
@@ -328,21 +473,6 @@ class _FolderTile extends StatelessWidget {
   }
 }
 
-/// Cofanie do folderu nadrzędnego
-class _BackTile extends StatelessWidget {
-  final VoidCallback onTap;
-
-  const _BackTile({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      leading: const Icon(Icons.arrow_upward),
-      title: const Text('Up'),
-      onTap: onTap,
-    );
-  }
-}
 
 /// Pojedynczy zestaw
 class _SetTile extends StatelessWidget {
@@ -364,10 +494,11 @@ class _SetTile extends StatelessWidget {
 }
 
 /// Nagłówek strony
-class _Header extends StatelessWidget {
+// ignore: unused_element
+class _HeaderOld extends StatelessWidget {
   final String path;
 
-  const _Header({required this.path});
+  const _HeaderOld({required this.path});
 
   @override
   Widget build(BuildContext context) {
@@ -385,6 +516,98 @@ class _Header extends StatelessWidget {
     );
   }
 }
+
+class _Header extends StatelessWidget {
+  final List<FolderNode> breadcrumb;
+  final Function(FolderNode) onNavigate;
+
+  const _Header({
+    required this.breadcrumb,
+    required this.onNavigate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = theme.colorScheme.primary;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          /// Tytuł sekcji
+          Text(
+            'Resources',
+            style: theme.textTheme.headlineSmall,
+          ),
+          const SizedBox(height: 12),
+
+          /// Scrollowalny breadcrumb
+          SizedBox(
+            height: 44,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: breadcrumb.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (context, index) {
+                final folder = breadcrumb[index];
+                final isLast = index == breadcrumb.length - 1;
+
+                return GestureDetector(
+                  onTap: isLast ? null : () => onNavigate(folder),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isLast
+                          ? color.withOpacity(0.15)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                        color: isLast ? Colors.transparent : color,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          folder.name == '/' ? Icons.home : Icons.folder,
+                          size: 18,
+                          color: color,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          folder.name == '/' ? 'Home' : folder.name,
+                          style: TextStyle(
+                            color: color,
+                            fontWeight:
+                                isLast ? FontWeight.w600 : FontWeight.w500,
+                          ),
+                        ),
+                        if (!isLast) ...[
+                          const SizedBox(width: 6),
+                          const Icon(
+                            Icons.chevron_right,
+                            size: 18,
+                            color: Colors.grey,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 
 /// Pasek akcji (Create folder / Add set)
 class _ActionsBar extends StatelessWidget {
